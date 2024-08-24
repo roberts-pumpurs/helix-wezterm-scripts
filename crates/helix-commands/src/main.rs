@@ -20,10 +20,9 @@ enum Commands {
     Fzf,
     FzfCallback { output: String },
     Open,
-    // todo gitui
-    // todo gititre
-    // todo serpl
-    // todo utils for resizing and splitting panes
+    Gitui,
+    GitTree,
+    Serpl,
     WezSetupPanes,
     WezFormatPanes,
     WezLargeTerminal,
@@ -107,6 +106,24 @@ fn main() -> eyre::Result<()> {
             let panes = setup_initial_panes(&sh, current_pane_id)?;
             let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
             resize_panes(&sh, SMALL_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
+        }
+        Commands::Gitui => {
+            let pane_id = get_or_split_pane(&sh, Direction::Right, current_pane_id)?;
+            let command = format!("gitui");
+            run_command(&sh, pane_id, command)?;
+            focus_pane(&sh, pane_id)?;
+        }
+        Commands::GitTree => {
+            let pane_id = get_or_split_pane(&sh, Direction::Right, current_pane_id)?;
+            let command = format!("git-igitt");
+            run_command(&sh, pane_id, command)?;
+            focus_pane(&sh, pane_id)?;
+        }
+        Commands::Serpl => {
+            let pane_id = get_or_split_pane(&sh, Direction::Right, current_pane_id)?;
+            let command = format!("serpl");
+            run_command(&sh, pane_id, command)?;
+            focus_pane(&sh, pane_id)?;
         }
     }
 
