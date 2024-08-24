@@ -1,4 +1,4 @@
-use std::{ops::Index, process::Command, usize};
+use std::{env, ops::Index, process::Command, usize};
 
 use clap::{Parser, Subcommand};
 use color_eyre::owo_colors::OwoColorize;
@@ -16,11 +16,9 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Blame,
-    // todo
     Explorer,
-    // todo
     Fzf,
-    // todo
+    FzfCallback { output: String },
     Open,
     // todo gitui
     // todo gititre
@@ -36,7 +34,84 @@ const DEFAULT_PANE_COUNT: usize = 3;
 const DEFAULT_PANES_SIZES: [u64; DEFAULT_PANE_COUNT] = [10, 60, 30];
 const LARGE_TERMINAL_LAYOUT: [u64; DEFAULT_PANE_COUNT] = [10, 40, 50];
 const SMALL_TERMINAL_LAYOUT: [u64; DEFAULT_PANE_COUNT] = [10, 80, 10];
-const TERMINAL_IDX: usize = DEFAULT_PANE_COUNT - 1;
+
+fn main() -> eyre::Result<()> {
+    color_eyre::install()?;
+    let sh = Shell::new()?;
+    let args = Args::parse();
+    let current_pane_id = std::env::var("WEZTERM_PANE")?;
+
+    match args.command {
+        Commands::Blame => {
+            let ParsedHelx {
+                filename,
+                line_number,
+                ..
+            } = parse_helix(&sh)?;
+            let pane_id = get_or_split_pane(&sh, Direction::Right, &current_pane_id)?;
+            let command = format!("tig blame {filename} +{line_number}");
+            run_command(&sh, &pane_id, command)?;
+            focus_pane(&sh, &pane_id)?;
+        }
+        Commands::Explorer => {
+            let pane_id = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
+            let command = format!("bo");
+            run_command(&sh, &pane_id, command)?;
+            focus_pane(&sh, &pane_id)?;
+        }
+        Commands::Fzf => {
+            let pane_id = get_or_split_pane(&sh, Direction::Right, &current_pane_id)?;
+            let current_exe = env::current_exe()?.to_str().unwrap().to_owned();
+
+            let command_1 = format!("rg --line-number --column --no-heading --smart-case .");
+            let command_2 = format!("fzf --delimiter : --preview 'bat --style=full --color=always --highlight-line {{2}} {{1}}' --preview-window '~3,+{{2}}+3/2'");
+            let command = [command_1, command_2].join(" | ");
+            let command_3 = format!(r#"{current_exe} fzf-callback "$({command})""#);
+            // output is in format of "crates/helix-commands/src/main.rs:159:1:fn resize_panes<const N: usize>("
+            run_command(&sh, &pane_id, command_3)?;
+            focus_pane(&sh, &pane_id)?;
+        }
+        Commands::FzfCallback { output } => {
+            // output is in format of "crates/helix-commands/src/main.rs:159:1:fn resize_panes<const N: usize>("
+            let output = output.split(':').take(3).collect::<Vec<_>>();
+            let output = output.join(":");
+            // we are focused on the terminal, therefore helix is to the left
+            let pane_id = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
+
+            let command = format!(":open {output}\r");
+            run_command(&sh, &pane_id, command)?;
+            focus_pane(&sh, &pane_id)?;
+        }
+        Commands::Open => {
+            let ParsedHelx {
+                filename,
+                line_number,
+                ..
+            } = parse_helix(&sh)?;
+            cmd!(sh, "gh browse {filename}:{line_number}").run()?;
+        }
+        Commands::WezSetupPanes => {
+            setup(&sh, &current_pane_id)?;
+        }
+        Commands::WezFormatPanes => {
+            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
+            resize_panes(&sh, DEFAULT_PANES_SIZES, total_cells, current_size, panes)?;
+        }
+        Commands::WezLargeTerminal => {
+            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
+            resize_panes(&sh, LARGE_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
+        }
+        Commands::WezSmallTerminal => {
+            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
+            resize_panes(&sh, SMALL_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
+        }
+    }
+
+    Ok(())
+}
 
 fn get_or_split_pane(
     sh: &Shell,
@@ -198,68 +273,6 @@ fn get_status_line(sh: &Shell) -> eyre::Result<(String, String)> {
     }
 }
 
-fn main() -> eyre::Result<()> {
-    color_eyre::install()?;
-    let sh = Shell::new()?;
-    let args = Args::parse();
-    let current_pane_id = std::env::var("WEZTERM_PANE")?;
-
-    match args.command {
-        Commands::Blame => {
-            let ParsedHelx {
-                filename,
-                line_number,
-                ..
-            } = parse_helix(&sh)?;
-            let pane_id = get_or_split_pane(&sh, Direction::Right, &current_pane_id)?;
-            let command = format!("tig blame {filename} +{line_number}");
-            run_command(&sh, &pane_id, command)?;
-            focus_pane(&sh, &pane_id)?;
-        }
-        Commands::Explorer => {
-            let pane_id = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
-            let command = format!("bo");
-            run_command(&sh, &pane_id, command)?;
-            focus_pane(&sh, &pane_id)?;
-        }
-        Commands::Fzf => {
-            // let fzf_command = format!(
-            //     "cd {pwd}; ~/.config/helix/helix-fzf.sh $(rg --line-number --column --no-heading --smart-case . | fzf --delimiter : --preview 'bat --style=full --color=always --highlight-line {{2}} {{1}}' --preview-window '~3,+{{2}}+3/2' | awk '{{ print $1 }}' | cut -d: -f1,2,3)",
-            //     pwd = pwd.display()
-            // );
-            // cmd!(sh, "wezterm cli send-text --no-paste {fzf_command}").run()?;
-        }
-        Commands::Open => {
-            let ParsedHelx {
-                filename,
-                line_number,
-                ..
-            } = parse_helix(&sh)?;
-            cmd!(sh, "gh browse {filename}:{line_number}").run()?;
-        }
-        Commands::WezSetupPanes => {
-            setup(&sh, &current_pane_id)?;
-        }
-        Commands::WezFormatPanes => {
-            let panes = setup_initial_panes(&sh, &current_pane_id)?;
-            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
-            resize_panes(&sh, DEFAULT_PANES_SIZES, total_cells, current_size, panes)?;
-        }
-        Commands::WezLargeTerminal => {
-            let panes = setup_initial_panes(&sh, &current_pane_id)?;
-            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
-            resize_panes(&sh, LARGE_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
-        }
-        Commands::WezSmallTerminal => {
-            let panes = setup_initial_panes(&sh, &current_pane_id)?;
-            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
-            resize_panes(&sh, SMALL_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
-        }
-    }
-
-    Ok(())
-}
-
 struct ParsedHelx {
     filename: String,
     line_number: String,
@@ -293,14 +306,15 @@ fn parse_helix(sh: &Shell) -> Result<ParsedHelx, eyre::Error> {
     })
 }
 
-fn run_command(sh: &Shell, pane_id: &str, mut command: String) -> Result<String, eyre::Error> {
+fn run_command(sh: &Shell, pane_id: &str, mut command: String) -> Result<(), eyre::Error> {
     command += "\n";
-    let output = cmd!(
+    cmd!(
         sh,
         "wezterm cli send-text --pane-id {pane_id} --no-paste {command}"
     )
-    .read()?;
-    Ok(output)
+    .quiet()
+    .run()?;
+    Ok(())
 }
 
 #[derive(Debug, Copy, Clone)]
