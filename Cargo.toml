@@ -41,3 +41,4 @@ xshell = "0.2"
 eyre = "0.6"
 color-eyre = "0.6"
 regex = "1.10"
+tokio = { verion = "1", features = ["full"] }

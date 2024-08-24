@@ -1,6 +1,7 @@
-use std::process::Command;
+use std::{ops::Index, process::Command, usize};
 
 use clap::{Parser, Subcommand};
+use color_eyre::owo_colors::OwoColorize;
 use eyre::OptionExt;
 use regex::Regex;
 use xshell::{cmd, Shell};
@@ -15,27 +16,162 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Blame,
-    Check,
+    // todo
     Explorer,
+    // todo
     Fzf,
+    // todo
     Open,
+    // todo gitui
+    // todo gititre
+    // todo serpl
+    // todo utils for resizing and splitting panes
+    WezSetupPanes,
+    WezFormatPanes,
+    WezLargeTerminal,
+    WezSmallTerminal,
 }
 
-fn split_pane_right(sh: &Shell) -> eyre::Result<String> {
-    let pane_id = cmd!(sh, "wezterm cli get-pane-direction right")
-        .read()
-        .ok()
-        .or_else(|| cmd!(sh, "wezterm cli split-pane --right").read().ok())
-        .ok_or_eyre("could not get pane id")?;
-    println!("pane id {pane_id}");
+const DEFAULT_PANE_COUNT: usize = 3;
+const DEFAULT_PANES_SIZES: [u64; DEFAULT_PANE_COUNT] = [10, 60, 30];
+const LARGE_TERMINAL_LAYOUT: [u64; DEFAULT_PANE_COUNT] = [10, 40, 50];
+const SMALL_TERMINAL_LAYOUT: [u64; DEFAULT_PANE_COUNT] = [10, 80, 10];
+const TERMINAL_IDX: usize = DEFAULT_PANE_COUNT - 1;
 
-    cmd!(
+fn get_or_split_pane(
+    sh: &Shell,
+    direction: Direction,
+    current_pane: &str,
+) -> Result<String, eyre::Error> {
+    let direction = direction.as_ref();
+    let pane_id = cmd!(
         sh,
-        "echo wezterm cli activate-pane-direction --pane-id {pane_id} right"
+        "wezterm cli get-pane-direction --pane-id {current_pane} {direction}"
     )
-    .run()?;
-
+    .read()?;
+    let pane_id = if pane_id.is_empty() {
+        cmd!(
+            sh,
+            "wezterm cli split-pane --{direction} --pane-id {current_pane}"
+        )
+        .read()?
+    } else {
+        pane_id
+    };
     Ok(pane_id)
+}
+
+fn setup(sh: &Shell, current_pane_id: &str) -> eyre::Result<()> {
+    let panes = setup_initial_panes(sh, current_pane_id)?;
+    let (current_size, total_cells) = get_pane_sizes(sh, &panes)?;
+
+    // split panes
+    resize_panes(sh, DEFAULT_PANES_SIZES, total_cells, current_size, panes)?;
+
+    // open bo on left
+    let pane_id = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
+    let command = format!("bo");
+    run_command(&sh, &pane_id, command)?;
+
+    // focus on middle
+    focus_pane(&sh, &current_pane_id)?;
+    Ok(())
+}
+
+fn resize_panes<const N: usize>(
+    sh: &Shell,
+    sizes_in_percent: [u64; N],
+    total_cells: u64,
+    current_size: [u64; N],
+    panes: [String; N],
+) -> Result<(), eyre::Error> {
+    let desired_sizes = sizes_in_percent.map(|x| x * total_cells / 100);
+    let diff = desired_sizes
+        .iter()
+        .zip(current_size)
+        .map(|(desired, current)| (current as i128) - (*desired as i128))
+        .collect::<Vec<_>>();
+    println!("diff {diff:?}");
+    let mut shrink_direction = [Direction::Left].repeat(N - 1);
+    shrink_direction.push(Direction::Right);
+
+    let mut grow_directoin = [Direction::Right].repeat(N - 1);
+    grow_directoin.push(Direction::Left);
+    Ok(
+        for (((pane_id, diff), shrink_dir), grow_dir) in panes
+            .iter()
+            .zip(diff)
+            .zip(shrink_direction)
+            .zip(grow_directoin)
+            // we skip the last one
+            .take(N - 1)
+        {
+            let direction = if diff.is_negative() {
+                grow_dir
+            } else {
+                shrink_dir
+            };
+            let desired_size = diff.abs().to_string();
+            cmd!(sh, "wezterm cli activate-pane --pane-id {pane_id}")
+                .quiet()
+                .run()?;
+            let direction = direction.as_ref();
+            cmd!(
+            sh,
+            "wezterm cli adjust-pane-size --pane-id {pane_id} --amount {desired_size} {direction}"
+        )
+            .run()?;
+        },
+    )
+}
+
+fn get_pane_sizes(sh: &Shell, panes: &[String; 3]) -> Result<([u64; 3], u64), eyre::Error> {
+    let mut current_size = [0_u64; 3];
+    let pane_info = cmd!(sh, "wezterm cli list").read()?;
+    let pane_info = extract_pane_id_and_size(&pane_info)
+        .into_iter()
+        .filter(|(pane_id, _)| panes.contains(&pane_id))
+        .collect::<Vec<_>>();
+    let total_cells = pane_info.iter().map(|x| x.1 as u64).sum::<u64>();
+    for (pane_id, size) in pane_info.iter() {
+        let idx = panes.iter().position(|x| x == pane_id).unwrap();
+        current_size[idx] = *size as u64;
+    }
+    Ok((current_size, total_cells))
+}
+
+fn setup_initial_panes(sh: &Shell, current_pane_id: &str) -> Result<[String; 3], eyre::Error> {
+    let pane_id_left = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
+    focus_pane(sh, &current_pane_id)?;
+    let pane_id_right = get_or_split_pane(&sh, Direction::Right, &current_pane_id)?;
+    focus_pane(sh, &current_pane_id)?;
+    let panes = [pane_id_left, current_pane_id.to_owned(), pane_id_right];
+    Ok(panes)
+}
+
+fn focus_pane(sh: &Shell, pane_id: &str) -> Result<(), eyre::Error> {
+    cmd!(sh, "wezterm cli activate-pane --pane-id {pane_id}")
+        .quiet()
+        .run()?;
+    Ok(())
+}
+
+fn extract_pane_id_and_size(input: &str) -> Vec<(String, u8)> {
+    input
+        .lines()
+        .skip(1) // Skip the header line
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 5 {
+                return None;
+            }
+            let pane_id = parts[2].to_string();
+            let size = parts[4].to_string();
+            let (x, _y) = size.split_once('x')?;
+            let x = x.parse::<u8>().ok()?;
+            Some((pane_id, x))
+        })
+        .collect()
 }
 
 fn get_status_line(sh: &Shell) -> eyre::Result<(String, String)> {
@@ -66,14 +202,75 @@ fn main() -> eyre::Result<()> {
     color_eyre::install()?;
     let sh = Shell::new()?;
     let args = Args::parse();
+    let current_pane_id = std::env::var("WEZTERM_PANE")?;
 
-    let (filename, line_number) = get_status_line(&sh)?;
+    match args.command {
+        Commands::Blame => {
+            let ParsedHelx {
+                filename,
+                line_number,
+                ..
+            } = parse_helix(&sh)?;
+            let pane_id = get_or_split_pane(&sh, Direction::Right, &current_pane_id)?;
+            let command = format!("tig blame {filename} +{line_number}");
+            run_command(&sh, &pane_id, command)?;
+            focus_pane(&sh, &pane_id)?;
+        }
+        Commands::Explorer => {
+            let pane_id = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
+            let command = format!("bo");
+            run_command(&sh, &pane_id, command)?;
+            focus_pane(&sh, &pane_id)?;
+        }
+        Commands::Fzf => {
+            // let fzf_command = format!(
+            //     "cd {pwd}; ~/.config/helix/helix-fzf.sh $(rg --line-number --column --no-heading --smart-case . | fzf --delimiter : --preview 'bat --style=full --color=always --highlight-line {{2}} {{1}}' --preview-window '~3,+{{2}}+3/2' | awk '{{ print $1 }}' | cut -d: -f1,2,3)",
+            //     pwd = pwd.display()
+            // );
+            // cmd!(sh, "wezterm cli send-text --no-paste {fzf_command}").run()?;
+        }
+        Commands::Open => {
+            let ParsedHelx {
+                filename,
+                line_number,
+                ..
+            } = parse_helix(&sh)?;
+            cmd!(sh, "gh browse {filename}:{line_number}").run()?;
+        }
+        Commands::WezSetupPanes => {
+            setup(&sh, &current_pane_id)?;
+        }
+        Commands::WezFormatPanes => {
+            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
+            resize_panes(&sh, DEFAULT_PANES_SIZES, total_cells, current_size, panes)?;
+        }
+        Commands::WezLargeTerminal => {
+            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
+            resize_panes(&sh, LARGE_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
+        }
+        Commands::WezSmallTerminal => {
+            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
+            resize_panes(&sh, SMALL_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
+        }
+    }
 
-    println!("Filename: {}", filename);
-    println!("Line Number: {}", line_number);
+    Ok(())
+}
 
-    let pwd = sh.current_dir();
-    let basedir = std::path::Path::new(&filename).parent().unwrap_or(&pwd);
+struct ParsedHelx {
+    filename: String,
+    line_number: String,
+    file_extension: String,
+    file_name_without_extension: String,
+}
+
+fn parse_helix(sh: &Shell) -> Result<ParsedHelx, eyre::Error> {
+    let (filename, line_number) = get_status_line(sh)?;
+    eprintln!("Filename: {}", filename);
+    eprintln!("Line Number: {}", line_number);
     let basename = std::path::Path::new(&filename)
         .file_name()
         .unwrap_or_default();
@@ -88,77 +285,35 @@ fn main() -> eyre::Result<()> {
         .unwrap_or_default()
         .to_str()
         .unwrap_or("");
+    Ok(ParsedHelx {
+        file_name_without_extension: basename_without_extension.to_string(),
+        file_extension: extension.to_string(),
+        filename,
+        line_number,
+    })
+}
 
-    match args.command {
-        Commands::Blame => {
-            let pane_id = split_pane_right(&sh)?;
-            // let command = cmd!(sh, "cd {pwd}; tig blame {filename} +{line_number}").to_string();
-            // Command::new("")
-            //     .args([r#"echo "ls -lha" | wezterm cli send-text --pane-id 11 --no-paste"#])
-            //     .spawn()
-            //     .unwrap();
-            // cmd!(
-            //     sh,
-            //     "wezterm cli send-text --pane-id 11 --no-paste ls -lha" // "wezterm cli send-text --pane-id 11 --no-paste \"123\""
-            // )
-            // .run()?;
-            // let pane_id = "11";
-            let command = "ls -lha\n";
-            cmd!(
-                sh,
-                "wezterm cli send-text --pane-id {pane_id} --no-paste {command}"
-            )
-            .run()?;
-        }
-        Commands::Check => {
-            split_pane_right(&sh)?;
-            if extension == "rs" {
-                let run_command = format!(
-                    "cd {}/{}; cargo check; if [ $? = 0 ]; wezterm cli activate-pane-direction up; end;",
-                    pwd.display(),
-                    filename.replace("src/.*$", "")
-                );
-                cmd!(sh, "wezterm cli send-text --no-paste {run_command}").run()?;
-            }
-        }
-        Commands::Explorer => {
-            let left_pane_id = cmd!(sh, "wezterm cli get-pane-direction left")
-                .read()
-                .ok()
-                .or_else(|| {
-                    cmd!(sh, "wezterm cli split-pane --left --percent 20")
-                        .read()
-                        .ok()
-                });
+fn run_command(sh: &Shell, pane_id: &str, mut command: String) -> Result<String, eyre::Error> {
+    command += "\n";
+    let output = cmd!(
+        sh,
+        "wezterm cli send-text --pane-id {pane_id} --no-paste {command}"
+    )
+    .read()?;
+    Ok(output)
+}
 
-            if let Some(ref pane_id) = left_pane_id {
-                let left_program = cmd!(
-                    sh,
-                    "wezterm cli list | awk -v pane_id={pane_id} '$3==pane_id {{ print $6 }}'"
-                )
-                .read()?;
-                if left_program.trim() != "br" {
-                    cmd!(
-                        sh,
-                        "wezterm cli send-text --pane-id {pane_id} --no-paste 'bo'"
-                    )
-                    .run()?;
-                }
-                cmd!(sh, "wezterm cli activate-pane-direction left").run()?;
-            }
-        }
-        Commands::Fzf => {
-            split_pane_right(&sh)?;
-            let fzf_command = format!(
-                "cd {pwd}; ~/.config/helix/helix-fzf.sh $(rg --line-number --column --no-heading --smart-case . | fzf --delimiter : --preview 'bat --style=full --color=always --highlight-line {{2}} {{1}}' --preview-window '~3,+{{2}}+3/2' | awk '{{ print $1 }}' | cut -d: -f1,2,3)",
-                pwd = pwd.display()
-            );
-            cmd!(sh, "wezterm cli send-text --no-paste {fzf_command}").run()?;
-        }
-        Commands::Open => {
-            cmd!(sh, "gh browse {filename}:{line_number}").run()?;
+#[derive(Debug, Copy, Clone)]
+enum Direction {
+    Left,
+    Right,
+}
+
+impl AsRef<str> for Direction {
+    fn as_ref(&self) -> &str {
+        match self {
+            Direction::Left => "left",
+            Direction::Right => "right",
         }
     }
-
-    Ok(())
 }
