@@ -33,13 +33,13 @@ enum Commands {
 const DEFAULT_PANE_COUNT: usize = 3;
 const DEFAULT_PANES_SIZES: [u64; DEFAULT_PANE_COUNT] = [10, 60, 30];
 const LARGE_TERMINAL_LAYOUT: [u64; DEFAULT_PANE_COUNT] = [10, 40, 50];
-const SMALL_TERMINAL_LAYOUT: [u64; DEFAULT_PANE_COUNT] = [10, 80, 10];
+const SMALL_TERMINAL_LAYOUT: [u64; DEFAULT_PANE_COUNT] = [10, 95, 10];
 
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
     let sh = Shell::new()?;
     let args = Args::parse();
-    let current_pane_id = std::env::var("WEZTERM_PANE")?;
+    let current_pane_id = std::env::var("WEZTERM_PANE")?.parse()?;
 
     match args.command {
         Commands::Blame => {
@@ -48,19 +48,19 @@ fn main() -> eyre::Result<()> {
                 line_number,
                 ..
             } = parse_helix(&sh)?;
-            let pane_id = get_or_split_pane(&sh, Direction::Right, &current_pane_id)?;
+            let pane_id = get_or_split_pane(&sh, Direction::Right, current_pane_id)?;
             let command = format!("tig blame {filename} +{line_number}");
-            run_command(&sh, &pane_id, command)?;
-            focus_pane(&sh, &pane_id)?;
+            run_command(&sh, pane_id, command)?;
+            focus_pane(&sh, pane_id)?;
         }
         Commands::Explorer => {
-            let pane_id = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
+            let pane_id = get_or_split_pane(&sh, Direction::Left, current_pane_id)?;
             let command = format!("bo");
-            run_command(&sh, &pane_id, command)?;
-            focus_pane(&sh, &pane_id)?;
+            run_command(&sh, pane_id, command)?;
+            focus_pane(&sh, pane_id)?;
         }
         Commands::Fzf => {
-            let pane_id = get_or_split_pane(&sh, Direction::Right, &current_pane_id)?;
+            let pane_id = get_or_split_pane(&sh, Direction::Right, current_pane_id)?;
             let current_exe = env::current_exe()?.to_str().unwrap().to_owned();
 
             let command_1 = format!("rg --line-number --column --no-heading --smart-case .");
@@ -68,19 +68,19 @@ fn main() -> eyre::Result<()> {
             let command = [command_1, command_2].join(" | ");
             let command_3 = format!(r#"{current_exe} fzf-callback "$({command})""#);
             // output is in format of "crates/helix-commands/src/main.rs:159:1:fn resize_panes<const N: usize>("
-            run_command(&sh, &pane_id, command_3)?;
-            focus_pane(&sh, &pane_id)?;
+            run_command(&sh, pane_id, command_3)?;
+            focus_pane(&sh, pane_id)?;
         }
         Commands::FzfCallback { output } => {
             // output is in format of "crates/helix-commands/src/main.rs:159:1:fn resize_panes<const N: usize>("
             let output = output.split(':').take(3).collect::<Vec<_>>();
             let output = output.join(":");
             // we are focused on the terminal, therefore helix is to the left
-            let pane_id = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
+            let pane_id = get_or_split_pane(&sh, Direction::Left, current_pane_id)?;
 
             let command = format!(":open {output}\r");
-            run_command(&sh, &pane_id, command)?;
-            focus_pane(&sh, &pane_id)?;
+            run_command(&sh, pane_id, command)?;
+            focus_pane(&sh, pane_id)?;
         }
         Commands::Open => {
             let ParsedHelx {
@@ -91,20 +91,20 @@ fn main() -> eyre::Result<()> {
             cmd!(sh, "gh browse {filename}:{line_number}").run()?;
         }
         Commands::WezSetupPanes => {
-            setup(&sh, &current_pane_id)?;
+            setup(&sh, current_pane_id)?;
         }
         Commands::WezFormatPanes => {
-            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let panes = setup_initial_panes(&sh, current_pane_id)?;
             let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
             resize_panes(&sh, DEFAULT_PANES_SIZES, total_cells, current_size, panes)?;
         }
         Commands::WezLargeTerminal => {
-            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let panes = setup_initial_panes(&sh, current_pane_id)?;
             let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
             resize_panes(&sh, LARGE_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
         }
         Commands::WezSmallTerminal => {
-            let panes = setup_initial_panes(&sh, &current_pane_id)?;
+            let panes = setup_initial_panes(&sh, current_pane_id)?;
             let (current_size, total_cells) = get_pane_sizes(&sh, &panes)?;
             resize_panes(&sh, SMALL_TERMINAL_LAYOUT, total_cells, current_size, panes)?;
         }
@@ -116,9 +116,10 @@ fn main() -> eyre::Result<()> {
 fn get_or_split_pane(
     sh: &Shell,
     direction: Direction,
-    current_pane: &str,
-) -> Result<String, eyre::Error> {
+    current_pane: u64,
+) -> Result<u64, eyre::Error> {
     let direction = direction.as_ref();
+    let current_pane = current_pane.to_string();
     let pane_id = cmd!(
         sh,
         "wezterm cli get-pane-direction --pane-id {current_pane} {direction}"
@@ -133,10 +134,10 @@ fn get_or_split_pane(
     } else {
         pane_id
     };
-    Ok(pane_id)
+    Ok(pane_id.parse()?)
 }
 
-fn setup(sh: &Shell, current_pane_id: &str) -> eyre::Result<()> {
+fn setup(sh: &Shell, current_pane_id: u64) -> eyre::Result<()> {
     let panes = setup_initial_panes(sh, current_pane_id)?;
     let (current_size, total_cells) = get_pane_sizes(sh, &panes)?;
 
@@ -144,12 +145,12 @@ fn setup(sh: &Shell, current_pane_id: &str) -> eyre::Result<()> {
     resize_panes(sh, DEFAULT_PANES_SIZES, total_cells, current_size, panes)?;
 
     // open bo on left
-    let pane_id = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
+    let pane_id = get_or_split_pane(&sh, Direction::Left, current_pane_id)?;
     let command = format!("bo");
-    run_command(&sh, &pane_id, command)?;
+    run_command(&sh, pane_id, command)?;
 
     // focus on middle
-    focus_pane(&sh, &current_pane_id)?;
+    focus_pane(&sh, current_pane_id)?;
     Ok(())
 }
 
@@ -158,15 +159,15 @@ fn resize_panes<const N: usize>(
     sizes_in_percent: [u64; N],
     total_cells: u64,
     current_size: [u64; N],
-    panes: [String; N],
+    panes: [u64; N],
 ) -> Result<(), eyre::Error> {
-    let desired_sizes = sizes_in_percent.map(|x| x * total_cells / 100);
+    let cell_in_percent = (total_cells / 100).max(1);
+    let desired_sizes = sizes_in_percent.map(|x| x * cell_in_percent);
     let diff = desired_sizes
         .iter()
         .zip(current_size)
         .map(|(desired, current)| (current as i128) - (*desired as i128))
         .collect::<Vec<_>>();
-    println!("diff {diff:?}");
     let mut shrink_direction = [Direction::Left].repeat(N - 1);
     shrink_direction.push(Direction::Right);
 
@@ -187,6 +188,7 @@ fn resize_panes<const N: usize>(
                 shrink_dir
             };
             let desired_size = diff.abs().to_string();
+            let pane_id = pane_id.to_string();
             cmd!(sh, "wezterm cli activate-pane --pane-id {pane_id}")
                 .quiet()
                 .run()?;
@@ -200,10 +202,11 @@ fn resize_panes<const N: usize>(
     )
 }
 
-fn get_pane_sizes(sh: &Shell, panes: &[String; 3]) -> Result<([u64; 3], u64), eyre::Error> {
+fn get_pane_sizes(sh: &Shell, panes: &[u64; 3]) -> Result<([u64; 3], u64), eyre::Error> {
     let mut current_size = [0_u64; 3];
     let pane_info = cmd!(sh, "wezterm cli list").read()?;
-    let pane_info = extract_pane_id_and_size(&pane_info)
+    let pane_info = extract_pane_id_and_size(&pane_info);
+    let pane_info = pane_info
         .into_iter()
         .filter(|(pane_id, _)| panes.contains(&pane_id))
         .collect::<Vec<_>>();
@@ -215,23 +218,24 @@ fn get_pane_sizes(sh: &Shell, panes: &[String; 3]) -> Result<([u64; 3], u64), ey
     Ok((current_size, total_cells))
 }
 
-fn setup_initial_panes(sh: &Shell, current_pane_id: &str) -> Result<[String; 3], eyre::Error> {
-    let pane_id_left = get_or_split_pane(&sh, Direction::Left, &current_pane_id)?;
-    focus_pane(sh, &current_pane_id)?;
-    let pane_id_right = get_or_split_pane(&sh, Direction::Right, &current_pane_id)?;
-    focus_pane(sh, &current_pane_id)?;
-    let panes = [pane_id_left, current_pane_id.to_owned(), pane_id_right];
+fn setup_initial_panes(sh: &Shell, current_pane_id: u64) -> Result<[u64; 3], eyre::Error> {
+    let pane_id_left = get_or_split_pane(&sh, Direction::Left, current_pane_id)?;
+    focus_pane(sh, current_pane_id)?;
+    let pane_id_right = get_or_split_pane(&sh, Direction::Right, current_pane_id)?;
+    focus_pane(sh, current_pane_id)?;
+    let panes = [pane_id_left, current_pane_id, pane_id_right];
     Ok(panes)
 }
 
-fn focus_pane(sh: &Shell, pane_id: &str) -> Result<(), eyre::Error> {
+fn focus_pane(sh: &Shell, pane_id: u64) -> Result<(), eyre::Error> {
+    let pane_id = pane_id.to_string();
     cmd!(sh, "wezterm cli activate-pane --pane-id {pane_id}")
         .quiet()
         .run()?;
     Ok(())
 }
 
-fn extract_pane_id_and_size(input: &str) -> Vec<(String, u8)> {
+fn extract_pane_id_and_size(input: &str) -> Vec<(u64, u64)> {
     input
         .lines()
         .skip(1) // Skip the header line
@@ -240,10 +244,10 @@ fn extract_pane_id_and_size(input: &str) -> Vec<(String, u8)> {
             if parts.len() < 5 {
                 return None;
             }
-            let pane_id = parts[2].to_string();
+            let pane_id = parts[2].to_string().parse::<u64>().unwrap();
             let size = parts[4].to_string();
             let (x, _y) = size.split_once('x')?;
-            let x = x.parse::<u8>().ok()?;
+            let x = x.parse::<u64>().unwrap();
             Some((pane_id, x))
         })
         .collect()
@@ -306,8 +310,9 @@ fn parse_helix(sh: &Shell) -> Result<ParsedHelx, eyre::Error> {
     })
 }
 
-fn run_command(sh: &Shell, pane_id: &str, mut command: String) -> Result<(), eyre::Error> {
+fn run_command(sh: &Shell, pane_id: u64, mut command: String) -> Result<(), eyre::Error> {
     command += "\n";
+    let pane_id = pane_id.to_string();
     cmd!(
         sh,
         "wezterm cli send-text --pane-id {pane_id} --no-paste {command}"
